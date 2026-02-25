@@ -86,36 +86,57 @@ The `Retry-After: 5` header is set for in-progress jobs.
 - **Asset**: USDC (0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913)
 - **Timeout**: 300 seconds
 
-## Using x402 Client SDK
+## Using x402 Client (v2)
 
-The simplest way to pay and call the endpoint is with the `@x402/client` package:
+The server uses x402 **v2** protocol. Use `@x402/core` + `@x402/evm` (not the legacy `x402-axios`).
 
+**Install:**
+```bash
+npm install @x402/core @x402/evm viem
+```
+
+**Pay and generate:**
 ```typescript
-import { paymentRequiredClient } from "@x402/client";
-import { createWalletClient, http } from "viem";
-import { base } from "viem/chains";
+import { x402Client, x402HTTPClient } from "@x402/core/client";
+import { registerExactEvmScheme } from "@x402/evm/exact/client";
+import { toClientEvmSigner } from "@x402/evm";
+import { createPublicClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { base } from "viem/chains";
 
+// Any private key with USDC on Base — no CDP account needed
 const account = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
-const walletClient = createWalletClient({
-  account,
-  chain: base,
-  transport: http(),
-});
+const publicClient = createPublicClient({ chain: base, transport: http() });
+const signer = toClientEvmSigner(account, publicClient);
 
-const client = paymentRequiredClient(walletClient);
+const coreClient = new x402Client();
+registerExactEvmScheme(coreClient, { signer });
+const httpClient = new x402HTTPClient(coreClient);
 
-// This handles 402 → pay → retry automatically
-const response = await client.fetch(
-  "https://api-production-5b87.up.railway.app/v1/generate",
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic: "The History of Bitcoin" }),
-  }
+const url = "https://api-production-5b87.up.railway.app/v1/generate";
+const body = JSON.stringify({ topic: "The History of Bitcoin" });
+const headers = { "Content-Type": "application/json" };
+
+// 1. Hit the endpoint — get 402
+const res = await fetch(url, { method: "POST", body, headers });
+
+// 2. Parse payment requirements from header
+const paymentRequired = httpClient.getPaymentRequiredResponse(
+  (name) => res.headers.get(name),
 );
 
-const { data } = await response.json();
+// 3. Sign payment (EIP-3009 USDC transfer authorization)
+const payload = await httpClient.createPaymentPayload(paymentRequired);
+const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
+
+// 4. Retry with payment proof — get 202
+const paidRes = await fetch(url, {
+  method: "POST",
+  body,
+  headers: { ...headers, ...paymentHeaders },
+});
+
+const { data } = await paidRes.json();
 console.log(`Job ID: ${data.jobId}`);
 ```
 

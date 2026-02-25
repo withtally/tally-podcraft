@@ -77,29 +77,41 @@ See [SKILL.md](./SKILL.md) for the full API reference including:
 
 ## Example: TypeScript with x402 Client
 
+```bash
+npm install @x402/core @x402/evm viem
+```
+
 ```typescript
-import { paymentRequiredClient } from "@x402/client";
-import { createWalletClient, http } from "viem";
-import { base } from "viem/chains";
+import { x402Client, x402HTTPClient } from "@x402/core/client";
+import { registerExactEvmScheme } from "@x402/evm/exact/client";
+import { toClientEvmSigner } from "@x402/evm";
+import { createPublicClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { base } from "viem/chains";
 
+// Any wallet with USDC on Base — no CDP account needed
 const account = privateKeyToAccount(process.env.PRIVATE_KEY as `0x${string}`);
-const walletClient = createWalletClient({ account, chain: base, transport: http() });
-const client = paymentRequiredClient(walletClient);
+const publicClient = createPublicClient({ chain: base, transport: http() });
+const signer = toClientEvmSigner(account, publicClient);
 
-// Automatically handles 402 → pay → retry
-const response = await client.fetch(
-  "https://api-production-5b87.up.railway.app/v1/generate",
-  {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ topic: "The Future of AI Agents" }),
-  }
-);
+const coreClient = new x402Client();
+registerExactEvmScheme(coreClient, { signer });
+const httpClient = new x402HTTPClient(coreClient);
 
-const { data } = await response.json();
-// Poll for completion
-// GET https://api-production-5b87.up.railway.app/v1/generate/{data.jobId}
+const url = "https://api-production-5b87.up.railway.app/v1/generate";
+const body = JSON.stringify({ topic: "The Future of AI Agents" });
+const headers = { "Content-Type": "application/json" };
+
+// 1. Get 402 challenge
+const res = await fetch(url, { method: "POST", body, headers });
+// 2. Sign USDC payment
+const paymentRequired = httpClient.getPaymentRequiredResponse((n) => res.headers.get(n));
+const payload = await httpClient.createPaymentPayload(paymentRequired);
+const paymentHeaders = httpClient.encodePaymentSignatureHeader(payload);
+// 3. Retry with payment proof → 202
+const paidRes = await fetch(url, { method: "POST", body, headers: { ...headers, ...paymentHeaders } });
+const { data } = await paidRes.json();
+// 4. Poll: GET /v1/generate/{data.jobId}
 ```
 
 ## How Podcasts Are Generated
